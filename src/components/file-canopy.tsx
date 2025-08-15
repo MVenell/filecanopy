@@ -1,6 +1,15 @@
 "use client";
 
-import { useState, useRef, type ChangeEvent } from "react";
+import { useState, useRef, type ChangeEvent, useEffect } from "react";
+import {
+  ref,
+  uploadBytes,
+  listAll,
+  getDownloadURL,
+  deleteObject,
+  getMetadata,
+} from "firebase/storage";
+import { storage } from "@/lib/firebase";
 import {
   Card,
   CardContent,
@@ -33,59 +42,116 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { Upload, Download, Trash2, FileText, X } from "lucide-react";
+import { Upload, Download, Trash2, FileText, Loader } from "lucide-react";
 import { formatBytes } from "@/lib/utils";
+import { useToast } from "@/hooks/use-toast";
 
-interface UploadedFile {
-  id: string;
+interface StoredFile {
   name: string;
   size: number;
-  type: string;
   url: string;
-  file: File;
+  fullPath: string;
 }
 
 export default function FileCanopy() {
-  const [files, setFiles] = useState<UploadedFile[]>([]);
-  const [fileToDelete, setFileToDelete] = useState<UploadedFile | null>(null);
+  const [files, setFiles] = useState<StoredFile[]>([]);
+  const [fileToDelete, setFileToDelete] = useState<StoredFile | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const { toast } = useToast();
+
+  const fetchFiles = async () => {
+    setIsLoading(true);
+    try {
+      const storageRef = ref(storage, "files/");
+      const result = await listAll(storageRef);
+      const filesData = await Promise.all(
+        result.items.map(async (fileRef) => {
+          const url = await getDownloadURL(fileRef);
+          const metadata = await getMetadata(fileRef);
+          return {
+            name: metadata.name,
+            size: metadata.size,
+            url: url,
+            fullPath: fileRef.fullPath,
+          };
+        })
+      );
+      setFiles(filesData);
+    } catch (error) {
+      console.error("Error fetching files:", error);
+      toast({
+        variant: "destructive",
+        title: "Uh oh! Something went wrong.",
+        description: "There was a problem fetching your files.",
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchFiles();
+  }, []);
 
   const handleUploadClick = () => {
     fileInputRef.current?.click();
   };
 
-  const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
-    const chosenFiles = Array.from(event.target.files ?? []);
-    if (chosenFiles.length > 0) {
-      const newFile = chosenFiles[0];
-      const uploadedFile: UploadedFile = {
-        id: crypto.randomUUID(),
-        name: newFile.name,
-        size: newFile.size,
-        type: newFile.type,
-        url: URL.createObjectURL(newFile),
-        file: newFile,
-      };
-      setFiles((prevFiles) => [...prevFiles, uploadedFile]);
-    }
-    // Reset file input to allow re-uploading the same file
-    if(event.target) {
+  const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const chosenFile = event.target.files?.[0];
+    if (!chosenFile) return;
+
+    setIsUploading(true);
+    try {
+      const fileRef = ref(storage, `files/${chosenFile.name}`);
+      await uploadBytes(fileRef, chosenFile);
+      await fetchFiles(); // Refresh the file list
+      toast({
+        title: "Success!",
+        description: `"${chosenFile.name}" has been uploaded.`,
+      });
+    } catch (error) {
+      console.error("Error uploading file:", error);
+      toast({
+        variant: "destructive",
+        title: "Upload failed.",
+        description: "There was a problem uploading your file.",
+      });
+    } finally {
+      setIsUploading(false);
+       if(event.target) {
         event.target.value = "";
+    }
     }
   };
 
-  const handleDeleteInitiated = (file: UploadedFile) => {
+  const handleDeleteInitiated = (file: StoredFile) => {
     setFileToDelete(file);
   };
 
-  const handleDeleteConfirmed = () => {
-    if (fileToDelete) {
+  const handleDeleteConfirmed = async () => {
+    if (!fileToDelete) return;
+
+    try {
+      const fileRef = ref(storage, fileToDelete.fullPath);
+      await deleteObject(fileRef);
       setFiles((prevFiles) =>
-        prevFiles.filter((f) => f.id !== fileToDelete.id)
+        prevFiles.filter((f) => f.fullPath !== fileToDelete.fullPath)
       );
-      // Revoke the object URL to free up memory
-      URL.revokeObjectURL(fileToDelete.url);
       setFileToDelete(null);
+      toast({
+        title: "File deleted.",
+        description: `"${fileToDelete.name}" has been permanently deleted.`,
+      });
+    } catch (error) {
+      console.error("Error deleting file:", error);
+      toast({
+        variant: "destructive",
+        title: "Deletion failed.",
+        description: "There was a problem deleting your file.",
+      });
     }
   };
 
@@ -100,19 +166,34 @@ export default function FileCanopy() {
                 Upload, store, and manage your files with ease.
               </CardDescription>
             </div>
-            <Button onClick={handleUploadClick} className="w-full sm:w-auto">
-              <Upload className="mr-2 h-4 w-4" />
-              Upload File
+            <Button onClick={handleUploadClick} disabled={isUploading || isLoading} className="w-full sm:w-auto">
+              {isUploading ? (
+                <>
+                  <Loader className="mr-2 h-4 w-4 animate-spin" />
+                  Uploading...
+                </>
+              ) : (
+                <>
+                  <Upload className="mr-2 h-4 w-4" />
+                  Upload File
+                </>
+              )}
             </Button>
             <input
               type="file"
               ref={fileInputRef}
               onChange={handleFileChange}
               className="hidden"
+              disabled={isUploading}
             />
           </CardHeader>
           <CardContent>
-            {files.length === 0 ? (
+             {isLoading ? (
+               <div className="flex flex-col items-center justify-center gap-4 rounded-lg border-2 border-dashed border-muted bg-background/50 p-12 text-center">
+                 <Loader className="h-10 w-10 animate-spin text-muted-foreground" />
+                 <p className="text-lg font-medium text-muted-foreground">Loading files...</p>
+               </div>
+            ) : files.length === 0 ? (
               <div className="flex flex-col items-center justify-center gap-4 rounded-lg border-2 border-dashed border-muted bg-background/50 p-12 text-center">
                 <div className="rounded-full border border-dashed p-4">
                     <FileText className="h-10 w-10 text-muted-foreground" />
@@ -139,7 +220,7 @@ export default function FileCanopy() {
                   </TableHeader>
                   <TableBody>
                     {files.map((file) => (
-                      <TableRow key={file.id} className="group transition-colors">
+                      <TableRow key={file.fullPath} className="group transition-colors">
                         <TableCell className="pl-4">
                           <FileText className="h-5 w-5 text-muted-foreground" />
                         </TableCell>
@@ -149,7 +230,7 @@ export default function FileCanopy() {
                           <div className="flex items-center justify-end gap-2">
                              <Tooltip>
                               <TooltipTrigger asChild>
-                                <a href={file.url} download={file.name}>
+                                <a href={file.url} download={file.name} target="_blank" rel="noopener noreferrer">
                                     <Button variant="ghost" size="icon">
                                         <Download className="h-4 w-4" />
                                         <span className="sr-only">Download</span>
