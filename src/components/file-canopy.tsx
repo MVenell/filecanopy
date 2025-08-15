@@ -9,7 +9,14 @@ import {
   deleteObject,
   getMetadata,
 } from "firebase/storage";
-import { storage } from "@/lib/firebase";
+import {
+  GoogleAuthProvider,
+  onAuthStateChanged,
+  signInWithPopup,
+  signOut,
+  type User,
+} from "firebase/auth";
+import { storage, auth } from "@/lib/firebase";
 import {
   Card,
   CardContent,
@@ -42,9 +49,10 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { Upload, Download, Trash2, FileText, Loader } from "lucide-react";
+import { Upload, Download, Trash2, FileText, Loader, LogIn, LogOut } from "lucide-react";
 import { formatBytes } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
+import { Avatar, AvatarFallback, AvatarImage } from "./ui/avatar";
 
 interface StoredFile {
   name: string;
@@ -54,6 +62,7 @@ interface StoredFile {
 }
 
 export default function FileCanopy() {
+  const [user, setUser] = useState<User | null>(null);
   const [files, setFiles] = useState<StoredFile[]>([]);
   const [fileToDelete, setFileToDelete] = useState<StoredFile | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -61,10 +70,10 @@ export default function FileCanopy() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
 
-  const fetchFiles = async () => {
+  const fetchFiles = async (userId: string) => {
     setIsLoading(true);
     try {
-      const storageRef = ref(storage, "files/");
+      const storageRef = ref(storage, `files/${userId}/`);
       const result = await listAll(storageRef);
       const filesData = await Promise.all(
         result.items.map(async (fileRef) => {
@@ -92,7 +101,16 @@ export default function FileCanopy() {
   };
 
   useEffect(() => {
-    fetchFiles();
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      if (currentUser) {
+        fetchFiles(currentUser.uid);
+      } else {
+        setFiles([]);
+        setIsLoading(false);
+      }
+    });
+    return () => unsubscribe();
   }, []);
 
   const handleUploadClick = () => {
@@ -100,14 +118,15 @@ export default function FileCanopy() {
   };
 
   const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    if (!user) return;
     const chosenFile = event.target.files?.[0];
     if (!chosenFile) return;
 
     setIsUploading(true);
     try {
-      const fileRef = ref(storage, `files/${chosenFile.name}`);
+      const fileRef = ref(storage, `files/${user.uid}/${chosenFile.name}`);
       await uploadBytes(fileRef, chosenFile);
-      await fetchFiles(); // Refresh the file list
+      await fetchFiles(user.uid); // Refresh the file list
       toast({
         title: "Success!",
         description: `"${chosenFile.name}" has been uploaded.`,
@@ -155,44 +174,104 @@ export default function FileCanopy() {
     }
   };
 
+  const handleSignIn = async () => {
+    const provider = new GoogleAuthProvider();
+    try {
+      await signInWithPopup(auth, provider);
+    } catch (error) {
+      console.error("Error signing in:", error);
+      toast({
+        variant: "destructive",
+        title: "Sign-in failed.",
+        description: "There was a problem signing you in.",
+      });
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await signOut(auth);
+    } catch (error) {
+      console.error("Error signing out:", error);
+      toast({
+        variant: "destructive",
+        title: "Sign-out failed.",
+        description: "There was a problem signing you out.",
+      });
+    }
+  };
+
   return (
     <TooltipProvider>
       <div className="w-full max-w-4xl">
         <Card className="w-full shadow-lg">
           <CardHeader className="flex flex-col items-start gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div className="space-y-1.5">
+            <div className="flex-1 space-y-1.5">
               <CardTitle className="text-2xl font-headline">File Canopy</CardTitle>
               <CardDescription>
                 Upload, store, and manage your files with ease.
               </CardDescription>
             </div>
-            <Button onClick={handleUploadClick} disabled={isUploading || isLoading} className="w-full sm:w-auto">
-              {isUploading ? (
-                <>
-                  <Loader className="mr-2 h-4 w-4 animate-spin" />
-                  Uploading...
-                </>
-              ) : (
-                <>
-                  <Upload className="mr-2 h-4 w-4" />
-                  Upload File
-                </>
-              )}
-            </Button>
-            <input
-              type="file"
-              ref={fileInputRef}
-              onChange={handleFileChange}
-              className="hidden"
-              disabled={isUploading}
-            />
+            {user ? (
+               <div className="flex items-center gap-4">
+                 <div className="flex items-center gap-2">
+                    <Avatar className="h-8 w-8">
+                        <AvatarImage src={user.photoURL || undefined} alt={user.displayName || 'User'} />
+                        <AvatarFallback>{user.displayName?.charAt(0) || 'U'}</AvatarFallback>
+                    </Avatar>
+                    <span className="text-sm font-medium">{user.displayName}</span>
+                 </div>
+                <Button onClick={handleSignOut} variant="outline">
+                  <LogOut className="mr-2 h-4 w-4" />
+                  Sign Out
+                </Button>
+              </div>
+            ) : (
+                <Button onClick={handleSignIn}>
+                    <LogIn className="mr-2 h-4 w-4" />
+                    Sign in with Google
+                </Button>
+            )}
           </CardHeader>
           <CardContent>
+             {user && (
+                <div className="mb-6 text-right">
+                    <Button onClick={handleUploadClick} disabled={isUploading || isLoading}>
+                    {isUploading ? (
+                        <>
+                        <Loader className="mr-2 h-4 w-4 animate-spin" />
+                        Uploading...
+                        </>
+                    ) : (
+                        <>
+                        <Upload className="mr-2 h-4 w-4" />
+                        Upload File
+                        </>
+                    )}
+                    </Button>
+                    <input
+                        type="file"
+                        ref={fileInputRef}
+                        onChange={handleFileChange}
+                        className="hidden"
+                        disabled={isUploading}
+                    />
+                </div>
+            )}
              {isLoading ? (
                <div className="flex flex-col items-center justify-center gap-4 rounded-lg border-2 border-dashed border-muted bg-background/50 p-12 text-center">
                  <Loader className="h-10 w-10 animate-spin text-muted-foreground" />
                  <p className="text-lg font-medium text-muted-foreground">Loading files...</p>
                </div>
+            ) : !user ? (
+                <div className="flex flex-col items-center justify-center gap-4 rounded-lg border-2 border-dashed border-muted bg-background/50 p-12 text-center">
+                    <div className="rounded-full border border-dashed p-4">
+                        <LogIn className="h-10 w-10 text-muted-foreground" />
+                    </div>
+                    <p className="text-lg font-medium text-muted-foreground">
+                        Please sign in to manage your files.
+                    </p>
+                </div>
             ) : files.length === 0 ? (
               <div className="flex flex-col items-center justify-center gap-4 rounded-lg border-2 border-dashed border-muted bg-background/50 p-12 text-center">
                 <div className="rounded-full border border-dashed p-4">
